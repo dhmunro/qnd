@@ -219,7 +219,7 @@ class PDBChart(object):
         """desc is (size, order, align) or (size, order, align, fpbits)"""
         ispdbptr = name == b'*'
         if ispdbptr:
-            name = b'char *'
+            name = b'char *'  # but causes a problem with PDB version 14 below
         size, order, align = desc[:3]
         if not order:
             order = 0
@@ -277,7 +277,8 @@ class PDBChart(object):
         if current:
             if current == (stype, dtype, align, fpbits):
                 return current[0]
-            else:
+            # Guard against data type named "char *" in PDB version 14 files.
+            elif ispdbptr or name != b'char *':
                 return None
         primitives[name] = stype, dtype, align, fpbits
         self.by_dtype.setdefault(dtype, (name, primitives))
@@ -820,6 +821,8 @@ def parser(handle, root, index=0, allrecs=None, atnames=None, hooks=None):
         _flip_shapes(structs, symtab)
     extras.pop(b'Offset', None)  # ignore all minimum index values
     structal = extras.pop(b'Struct-Align', [b'0'])[0]
+    if structal == b'0':
+        structal = extras.pop(b'Struct-Alignment', [b'0'])[0]
     try:
         structal = int(structal)
     except ValueError:
@@ -1066,22 +1069,22 @@ def _endparse(root, structal, haspointers, primtypes, structs, symtab, errors,
     dirdesc = primtypes.get(b'Directory')
     if dirdesc is not None:
         chart.add_primitive(b'Directory', dirdesc)
-    type_mismatch = False
+    type_mismatch = set()
     for name, desc in itemsof(primtypes):
         if chart.add_primitive(name, desc) is None:
-            type_mismatch = True
+            type_mismatch.add(name)
     if recordsym:
         dundertype = structs.pop(b'__')  # make sure this is last
     for name, desc in itemsof(structs):
         if chart.add_struct(name, desc) is None:
-            type_mismatch = True
+            type_mismatch.add(name)
     if recordsym:
         if chart.add_struct(b'__', dundertype) is None:
-            type_mismatch = True
+            type_mismatch.add(b'__')
         else:
             dundertype = chart.structs.pop(b'__')
     if type_mismatch:
-        raise IOError("data type mismatch building PDB structure chart")
+        errors.append("garbled types in chart: {}".format(type_mismatch))
 
     if recordsym:
         # Convert yorick default __@history style records to less
@@ -1179,10 +1182,18 @@ def _endparse(root, structal, haspointers, primtypes, structs, symtab, errors,
         # Ensure that attributes are overwritten if file is extended:
         handle = root.handle
         handle.declared(handle.zero_address() | int64(attr_address), None, 0)
-    if errors:
-        # Can filter this by module name.
+    if errors and not _ignore_warnings:
+        # Can filter warn by module name.
         print(errors)
         warn("{} errors parsing PDB metadata".format(len(errors)))
+
+
+def _supress_warnings(onoff=False):
+    """Call to prevent openpdb from printing warning errors"""
+    global _ignore_warnings
+    _ignore_warnings = True if onoff else False
+
+_ignore_warnings = False
 
 
 def _declare_group(groups, dirname):
